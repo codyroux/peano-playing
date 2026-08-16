@@ -24,42 +24,80 @@ open Term Ty
 #check (nat ⟶ (nat ⟶ nat))
 
 #check List.get
-
-def List.getLt (l : List α) (n : Nat) (h : n < l.length) : α :=
-match n, l with
-| 0, A::_ => A
-| n+1, A::l => List.getLt l n (by simp at h; omega)
+#eval let l := [1, 2]; l[3]!
+#check getElem!
+#check GetElem
+#check getElem!_def
 
 inductive HasType : Ctxt → Term → Ty → Prop where
-| var (h : n < Γ.length) : HasType Γ (var n) (Γ.getLt n h)
+| var (h : n < Γ.length) : HasType Γ (var n) (Γ[n])
 | app : HasType Γ t (A ⟶ B) → HasType Γ u A → HasType Γ (app t u) B
 | lam : HasType (A :: Γ) t B → HasType Γ (lam t) (A ⟶ B)
 | zero : HasType Γ zero nat
-| succ : HasType Γ t nat → HasType Γ (succ n) nat
+| succ : HasType Γ t nat → HasType Γ (succ t) nat
 | rect : HasType Γ z A → HasType Γ s (nat ⟶ A ⟶ A) → HasType Γ t nat → HasType Γ (rect z s t) A
 
-def subst (n : Nat) (t u : Term) : Term :=
+inductive Renaming where
+| idRen : Renaming
+| shift : Renaming
+| cons₀ : Renaming → Renaming
+| comp : Renaming → Renaming → Renaming
+
+def liftRen (τ : Renaming) : Renaming := .cons₀ (τ.comp .shift)
+
+
+def renVar (k : Nat) (ren : Renaming) : Nat :=
+match ren with
+| .idRen => k
+| .shift => k+1
+| .cons₀ τ => if k = 0 then 0 else renVar (k-1) τ
+| .comp τ ρ => renVar (renVar k τ) ρ
+
+def substRen (t : Term) (τ : Renaming) : Term :=
 match t with
-| var k => if n = k then u else t
-| (app t₁ t₂) => app (subst n t₁ u) (subst n t₂ u)
-| lam t' => lam (subst (n+1) t' u)
+| var k => var (renVar k τ)
+| app t u => app (substRen t τ) (substRen u τ)
+| lam t => lam (substRen t (liftRen τ))
 | zero => zero
-| succ t' => succ (subst n t' u)
-| rect z s t' => rect (subst n z u) (subst n s u) (subst n t' u)
+| succ t => succ (substRen t τ)
+| rect z s t => rect (substRen z τ) (substRen s τ) (substRen t τ)
 
-def substList (n : Nat) (t : Term) (us : List Term) : Term :=
+inductive Substitution where
+| ren : Renaming → Substitution
+| cons : Term → Substitution → Substitution
+| comp : Substitution → Renaming → Substitution
+
+def lift (σ : Substitution) : Substitution := .cons (var 0) (σ.comp .shift)
+
+def substVar (k : Nat) (σ : Substitution) : Term :=
+match σ with
+| .ren τ => var <| renVar k τ
+| .cons t σ => if k = 0 then t else substVar (k-1) σ
+| .comp σ τ => substRen (substVar k σ) τ
+
+def subst (t : Term) (σ : Substitution) : Term :=
 match t with
-| var k => if h:n+k < us.length then us.getLt (n+k) h else t
-| (app t₁ t₂) => app (substList n t₁ us) (substList n t₂ us)
-| lam t' => lam (substList (n+1) t' us)
+| var k => substVar k σ
+| app t₁ t₂ => app (subst t₁ σ) (subst t₂ σ)
+| lam t' => lam (subst t' (lift σ))
 | zero => zero
-| succ t' => succ (substList n t' us)
-| rect z s t' => rect (substList n z us) (substList n s us) (substList n t' us)
+| succ t' => succ (subst t' σ)
+| rect z s t' => rect (subst z σ) (subst s σ) (subst t' σ)
 
+infix:30 "∘" => Substitution.comp
+notation "id" => (Substitution.ren Renaming.idRen)
+infixr:30 "⋆" => Substitution.cons
 
-notation t "[" u "]" => subst 0 t u
+notation t "[" σ "]" => subst t σ
+notation t "[" u "]" => subst t (u⋆id)
+prefix:max "⇑" => lift
 
 #eval (var 0) [ lam (var 3) ]
+#eval subst (var 0) (zero ⋆ zero.succ ⋆ zero.succ.succ ⋆ id)
+#eval subst (var 1) (zero ⋆ zero.succ ⋆ zero.succ.succ ⋆ id)
+
+#check ⇑id
+#eval subst (var 1) ⇑(zero ⋆ id)
 
 -- small step :(
 inductive WHRed : Term → Term → Prop where
@@ -98,22 +136,9 @@ infix:30 "⊩" => (fun t ty => Comp ty t)
 
 #check zero ⊩ nat
 
-inductive CompEnv : List Ty → List Term → Prop where
-| empty : CompEnv [] []
-| cons : Comp ty t → CompEnv tys ts → CompEnv (ty :: tys) (t :: ts)
-
-theorem compenv_len (h : CompEnv Γ vs) : Γ.length = vs.length := by
-  cases h
-  case _ => grind
-  case _ => simp; apply compenv_len; trivial
-
-theorem compenv_getLen
-  (h : n < Γ.length)
-  (h' : n < vs.length)
-  (compenv : CompEnv Γ vs) : Comp (Γ.getLt n h) (vs.getLt n h') := by
-  cases compenv; grind
-  cases n <;> simp [List.getLt]; grind
-  apply compenv_getLen <;> grind
+inductive CompEnv : List Ty → Substitution → Prop where
+| empty : CompEnv [] id
+| cons : Comp ty t → CompEnv tys σ → CompEnv (ty :: tys) (t ⋆ σ)
 
 theorem comp_val_nat
   (val : ValNat v)
@@ -163,33 +188,59 @@ theorem WHNorm.appLam {t u : Term}
   . apply WHRed.appLam
   . apply WHNorm.refl
 
+theorem WHNorm.succ {t t' : Term}
+  : WHNorm t t' → WHNorm t.succ t'.succ := by
+  intros h
+  induction h; apply WHNorm.refl
+  case _ t₁ t₂ t₃ _ _ _ =>
+    apply WHNorm.step (t' := t₂.succ) <;> grind [WHRed]
+
+
+theorem subst_lift {t v : Term} {σ : Substitution} :
+  (t[⇑σ])[v] = t [v ⋆ σ] := by
+  sorry
 
 theorem comp_ty
         (typed : HasType Γ t ty)
-        (compEnv : CompEnv Γ vs)
-        : Comp ty (substList 0 t vs) := by
-  revert compEnv
+        (compEnv : CompEnv Γ σ)
+        : Comp ty (t[σ]) := by
+  revert compEnv σ
   induction typed
-  case _ n h =>
-    intro compEnv
-    simp [substList]
-    have h' := compenv_len compEnv; split <;> try grind
-    apply compenv_getLen; grind
+  case _ n Γ h =>
+    sorry
   case _ t _ _ u ty₁ ty₂ ih₁ ih₂ =>
-    intros compEnv
+    intros σ compEnv
     simp [Comp] at ih₁
     have ⟨v_fun, ⟨h₁, h₁'⟩⟩ := ih₁ compEnv
     have ih₂ := ih₂ compEnv
     cases h₁'
     case vallam A B comp_u t' comp_t' =>
-    simp [substList]
-    apply comp_exp (v := (t'.lam).app ((substList 0 u vs)))
-    . apply comp_exp (v := t'[substList 0 u vs])
+    simp [subst]
+    apply comp_exp (v := (t'.lam).app ((subst u σ)))
+    . apply comp_exp (v := t'[subst u σ])
       . grind
       . apply WHNorm.appLam
     . apply WHNorm.appNe
       exact h₁
-  case _ => sorry
-  case _ => sorry
-  case _ => sorry
+  case _ t _ _ ih  =>
+    simp [Comp, subst]
+    intros σ compEnv
+    exists (t[⇑σ]).lam
+    constructor; constructor
+    constructor
+    intros
+    rw [subst_lift]
+    apply ih
+    constructor <;> grind
+  case _ =>
+    simp [subst]
+    intros; exists .zero; grind [ValNat, WHNorm]
+  case _ Γ t ty ih =>
+    simp [subst]
+    intros σ compEnv; simp [Comp]
+    have ⟨v, h⟩ := ih compEnv
+    exists v.succ
+    constructor
+    . apply WHNorm.succ <;> grind
+    . grind [ValNat]
   case _ => sorry
