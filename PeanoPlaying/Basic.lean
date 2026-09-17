@@ -45,7 +45,6 @@ inductive Renaming where
 
 def liftRen (τ : Renaming) : Renaming := .cons₀ (τ.comp .shift)
 
-
 def renVar (k : Nat) (ren : Renaming) : Nat :=
 match ren with
 | .idRen => k
@@ -195,10 +194,209 @@ theorem WHNorm.succ {t t' : Term}
   case _ t₁ t₂ t₃ _ _ _ =>
     apply WHNorm.step (t' := t₂.succ) <;> grind [WHRed]
 
+theorem ren_congr (t : Term) :
+    ∀ τ₁ τ₂ : Renaming, (∀ k, renVar k τ₁ = renVar k τ₂) → substRen t τ₁ = substRen t τ₂ := by
+  induction t with
+  | var k => intro τ₁ τ₂ h; simp [substRen, h k]
+  | app t u iht ihu => intro τ₁ τ₂ h; simp [substRen, iht τ₁ τ₂ h, ihu τ₁ τ₂ h]
+  | lam t iht =>
+    intro τ₁ τ₂ h
+    simp only [substRen]
+    congr 1
+    apply iht
+    intro k
+    cases k with
+    | zero => simp [liftRen, renVar]
+    | succ k => simp [liftRen, renVar, h k]
+  | zero => intro τ₁ τ₂ h; simp [substRen]
+  | succ t iht => intro τ₁ τ₂ h; simp [substRen, iht τ₁ τ₂ h]
+  | rect z s t ihz ihs iht => intro τ₁ τ₂ h; simp [substRen, ihz τ₁ τ₂ h, ihs τ₁ τ₂ h, iht τ₁ τ₂ h]
+
+theorem subst_congr (t : Term) :
+    ∀ σ₁ σ₂ : Substitution, (∀ k, substVar k σ₁ = substVar k σ₂) → subst t σ₁ = subst t σ₂ := by
+  induction t with
+  | var k => intro σ₁ σ₂ h; simp [subst, h k]
+  | app t u iht ihu => intro σ₁ σ₂ h; simp [subst, iht σ₁ σ₂ h, ihu σ₁ σ₂ h]
+  | lam t iht =>
+    intro σ₁ σ₂ h
+    simp only [subst]
+    congr 1
+    apply iht
+    intro k
+    cases k with
+    | zero => simp [lift, substVar]
+    | succ k => simp [lift, substVar, h k]
+  | zero => intro σ₁ σ₂ h; simp [subst]
+  | succ t iht => intro σ₁ σ₂ h; simp [subst, iht σ₁ σ₂ h]
+  | rect z s t ihz ihs iht => intro σ₁ σ₂ h; simp [subst, ihz σ₁ σ₂ h, ihs σ₁ σ₂ h, iht σ₁ σ₂ h]
+
+theorem substRen_comp (t : Term) :
+    ∀ τ₁ τ₂ : Renaming, substRen (substRen t τ₁) τ₂ = substRen t (τ₁.comp τ₂) := by
+  induction t with
+  | var k => intro τ₁ τ₂; simp [substRen, renVar]
+  | app t u iht ihu => intro τ₁ τ₂; simp [substRen, iht τ₁ τ₂, ihu τ₁ τ₂]
+  | lam t iht =>
+    intro τ₁ τ₂
+    simp only [substRen]
+    congr 1
+    rw [iht (liftRen τ₁) (liftRen τ₂)]
+    apply ren_congr
+    intro k
+    cases k with
+    | zero => simp [liftRen, renVar]
+    | succ k => simp [liftRen, renVar]
+  | zero => intro τ₁ τ₂; simp [substRen]
+  | succ t iht => intro τ₁ τ₂; simp [substRen, iht τ₁ τ₂]
+  | rect z s t ihz ihs iht => intro τ₁ τ₂; simp [substRen, ihz τ₁ τ₂, ihs τ₁ τ₂, iht τ₁ τ₂]
+
+theorem subst_ren_fuse (t : Term) :
+    ∀ (ρ : Substitution) (τ : Renaming), subst t (ρ.comp τ) = substRen (subst t ρ) τ := by
+  induction t with
+  | var k => intro ρ τ; simp [subst, substVar]
+  | app t u iht ihu => intro ρ τ; simp [subst, substRen, iht ρ τ, ihu ρ τ]
+  | lam t iht =>
+    intro ρ τ
+    simp only [subst, substRen]
+    congr 1
+    rw [← iht (lift ρ) (liftRen τ)]
+    apply subst_congr
+    intro k
+    cases k with
+    | zero => simp [lift, substVar, substRen, liftRen, renVar]
+    | succ k =>
+      simp only [lift, substVar, Nat.succ_ne_zero, ite_false, Nat.succ_sub_one]
+      rw [substRen_comp, substRen_comp]
+      apply ren_congr
+      intro m
+      simp [renVar, liftRen]
+  | zero => intro ρ τ; simp [subst, substRen]
+  | succ t iht => intro ρ τ; simp [subst, substRen, iht ρ τ]
+  | rect z s t ihz ihs iht => intro ρ τ; simp [subst, substRen, ihz ρ τ, ihs ρ τ, iht ρ τ]
+
+theorem ren_subst_fuse (t : Term) :
+    ∀ (τ : Renaming) (ρ σ : Substitution),
+      (∀ k, substVar (renVar k τ) ρ = substVar k σ) →
+      subst (substRen t τ) ρ = subst t σ := by
+  induction t with
+  | var k => intro τ ρ σ h; simp [substRen, subst, h k]
+  | app t u iht ihu => intro τ ρ σ h; simp [substRen, subst, iht τ ρ σ h, ihu τ ρ σ h]
+  | lam t iht =>
+    intro τ ρ σ h
+    simp only [substRen, subst]
+    congr 1
+    apply iht
+    intro k
+    cases k with
+    | zero => simp [liftRen, renVar, lift, substVar]
+    | succ k => simp [liftRen, renVar, lift, substVar, h k]
+  | zero => intro τ ρ σ h; simp [substRen, subst]
+  | succ t iht => intro τ ρ σ h; simp [substRen, subst, iht τ ρ σ h]
+  | rect z s t ihz ihs iht => intro τ ρ σ h; simp [substRen, subst, ihz τ ρ σ h, ihs τ ρ σ h, iht τ ρ σ h]
+
+theorem subst_id (t : Term) : t [id] = t := by
+  induction t with
+  | var k => simp [subst, substVar, renVar]
+  | app t u iht ihu => simp [subst, iht, ihu]
+  | lam t iht =>
+    simp only [subst]
+    congr 1
+    rw [subst_congr t (⇑ id) id (by intro k; cases k <;> simp [lift, substVar, substRen, renVar])]
+    exact iht
+  | zero => simp [subst]
+  | succ t iht => simp [subst, iht]
+  | rect z s t ihz ihs iht => simp [subst, ihz, ihs, iht]
+
+theorem subsRen_shift_cons :
+  (substRen t Renaming.shift) [v ⋆ σ] = t [σ] := by
+  apply ren_subst_fuse
+  intro k
+  simp [renVar, substVar]
+
+theorem substVar_lift {x : Nat} {v : Term} {σ : Substitution} :
+  (substVar x (⇑ σ)) [v] = substVar x (v ⋆ σ) := by
+  cases x with
+  | zero => simp [substVar, lift, subst]
+  | succ x =>
+    simp only [lift, substVar, Nat.succ_ne_zero, ite_false, Nat.succ_sub_one]
+    rw [subsRen_shift_cons]
+    exact subst_id _
+
+theorem subst_fuse (t : Term) :
+    ∀ (ρ₁ ρ₂ σ : Substitution),
+      (∀ k, (substVar k ρ₁) [ρ₂] = substVar k σ) →
+      (t [ρ₁]) [ρ₂] = t [σ] := by
+  induction t with
+  | var k => intro ρ₁ ρ₂ σ h; simp [subst, h k]
+  | app t u iht ihu => intro ρ₁ ρ₂ σ h; simp [subst, iht ρ₁ ρ₂ σ h, ihu ρ₁ ρ₂ σ h]
+  | lam t iht =>
+    intro ρ₁ ρ₂ σ h
+    simp only [subst]
+    congr 1
+    apply iht
+    intro k
+    cases k with
+    | zero => simp [lift, substVar, subst]
+    | succ k =>
+      have e1 : substVar (k+1) (⇑ ρ₁) = substRen (substVar k ρ₁) Renaming.shift := by
+        simp [lift, substVar]
+      have e2 : substVar (k+1) (⇑ σ) = substRen (substVar k σ) Renaming.shift := by
+        simp [lift, substVar]
+      rw [e1, e2]
+      rw [ren_subst_fuse (substVar k ρ₁) Renaming.shift (⇑ ρ₂) (ρ₂.comp Renaming.shift)
+            (by intro m; simp [lift, substVar, renVar])]
+      rw [subst_ren_fuse (substVar k ρ₁) ρ₂ Renaming.shift]
+      rw [h k]
+  | zero => intro ρ₁ ρ₂ σ h; simp [subst]
+  | succ t iht => intro ρ₁ ρ₂ σ h; simp [subst, iht ρ₁ ρ₂ σ h]
+  | rect z s t ihz ihs iht => intro ρ₁ ρ₂ σ h; simp [subst, ihz ρ₁ ρ₂ σ h, ihs ρ₁ ρ₂ σ h, iht ρ₁ ρ₂ σ h]
 
 theorem subst_lift {t v : Term} {σ : Substitution} :
   (t[⇑σ])[v] = t [v ⋆ σ] := by
-  sorry
+  apply subst_fuse
+  intro k
+  exact substVar_lift
+
+theorem WHNorm.rectNe {z s t t' : Term}
+  (h : WHNorm t t') : WHNorm (rect z s t) (rect z s t') := by
+  induction h; apply WHNorm.refl
+  case _ t₁ t₂ t₃ _ _ _ =>
+    apply WHNorm.step (t' := rect z s t₂) <;> grind [WHRed]
+
+theorem comp_app
+  (h₁ : Comp (A ⟶ B) t) (h₂ : Comp A u) : Comp B (t.app u) := by
+  simp [Comp] at h₁
+  have ⟨v_fun, ⟨h₁a, h₁b⟩⟩ := h₁
+  cases h₁b
+  case vallam t' comp_t' =>
+  apply comp_exp (v := (t'.lam).app u)
+  . apply comp_exp (v := t'[u])
+    . grind
+    . apply WHNorm.appLam
+  . apply WHNorm.appNe
+    exact h₁a
+
+theorem rect_comp {A : Ty} {z s v : Term}
+    (valv : ValNat v) (hz : Comp A z) (hs : Comp (nat ⟶ A ⟶ A) s) :
+    Comp A (rect z s v) := by
+  induction valv with
+  | valzero =>
+    apply comp_exp (v := z) hz
+    apply WHNorm.step WHRed.rectz WHNorm.refl
+  | valSucc valk ih =>
+    rename_i k
+    apply comp_exp (v := (s.app k).app (rect z s k))
+    . exact comp_app (comp_app hs (comp_val_nat valk)) ih
+    . apply WHNorm.step WHRed.rects WHNorm.refl
+
+theorem comp_lookup {Γ : Ctxt} {σ : Substitution} (compEnv : CompEnv Γ σ) :
+    ∀ (n : Nat) (h : n < Γ.length), Comp (Γ[n]) (substVar n σ) := by
+  induction compEnv with
+  | empty => intro n h; simp at h
+  | cons hty hEnv ih =>
+    intro n h
+    cases n with
+    | zero => simpa [substVar] using hty
+    | succ n => simpa [substVar] using ih n (by simpa using h)
 
 theorem comp_ty
         (typed : HasType Γ t ty)
@@ -207,7 +405,9 @@ theorem comp_ty
   revert compEnv σ
   induction typed
   case _ n Γ h =>
-    sorry
+    intro σ compEnv
+    simp [subst]
+    exact comp_lookup compEnv n h
   case _ t _ _ u ty₁ ty₂ ih₁ ih₂ =>
     intros σ compEnv
     simp [Comp] at ih₁
@@ -243,4 +443,17 @@ theorem comp_ty
     constructor
     . apply WHNorm.succ <;> grind
     . grind [ValNat]
-  case _ => sorry
+  case _ =>
+    intro σ compEnv
+    rename_i Γ' z' A' s' t' hz hs ht ihz ihs iht
+    simp [subst]
+    have hz' := ihz compEnv
+    have hs' := ihs compEnv
+    have ht' := iht compEnv
+    simp [Comp] at ht'
+    have ⟨v, hv, valv⟩ := ht'
+    apply comp_exp (v := rect (z'[σ]) (s'[σ]) v)
+    . exact rect_comp valv hz' hs'
+    . apply WHNorm.rectNe
+      exact hv
+
