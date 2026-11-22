@@ -8,12 +8,17 @@ inductive Term where
 | zero : Term
 | succ : Term → Term
 | rect : Term → Term → Term → Term
+| pair : Term → Term → Term
+| fst : Term → Term
+| snd : Term → Term
 
 inductive Ty where
 | nat : Ty
 | arrow : Ty → Ty → Ty
+| prod : Ty → Ty → Ty
 
 infixr:30 " ⟶ " => Ty.arrow
+infixr:35 " ⊗ " => Ty.prod
 
 abbrev Ctxt := List Ty
 
@@ -39,6 +44,9 @@ inductive HasType : Ctxt → Term → Ty → Prop where
 | zero : HasType Γ zero nat
 | succ : HasType Γ t nat → HasType Γ (succ t) nat
 | rect : HasType Γ z A → HasType Γ s (nat ⟶ A ⟶ A) → HasType Γ t nat → HasType Γ (rect z s t) A
+| pair : HasType Γ a A → HasType Γ b B → HasType Γ (pair a b) (A ⊗ B)
+| fst : HasType Γ t (A ⊗ B) → HasType Γ (fst t) A
+| snd : HasType Γ t (A ⊗ B) → HasType Γ (snd t) B
 
 inductive Renaming where
 | idRen : Renaming
@@ -63,6 +71,9 @@ match t with
 | zero => zero
 | succ t => succ (substRen t τ)
 | rect z s t => rect (substRen z τ) (substRen s τ) (substRen t τ)
+| pair a b => pair (substRen a τ) (substRen b τ)
+| fst t => fst (substRen t τ)
+| snd t => snd (substRen t τ)
 
 inductive Substitution where
 | ren : Renaming → Substitution
@@ -85,6 +96,9 @@ match t with
 | zero => zero
 | succ t' => succ (subst t' σ)
 | rect z s t' => rect (subst z σ) (subst s σ) (subst t' σ)
+| pair a b => pair (subst a σ) (subst b σ)
+| fst t' => fst (subst t' σ)
+| snd t' => snd (subst t' σ)
 
 infix:30 "∘" => Substitution.comp
 notation "id" => (Substitution.ren Renaming.idRen)
@@ -109,6 +123,10 @@ inductive WHRed : Term → Term → Prop where
 | succ : WHRed t t' → WHRed (succ t) (succ t') -- it kind of sucks to have this one, but it makes defining computability a bit easier.
 | rectz : WHRed (rect z s zero) z
 | rects : WHRed (rect z s (succ t)) (app (app s t) (rect z s t))
+| fstNe : WHRed t t' → WHRed (fst t) (fst t')
+| sndNe : WHRed t t' → WHRed (snd t) (snd t')
+| fstPair : WHRed (fst (pair a b)) a
+| sndPair : WHRed (snd (pair a b)) b
 
 -- This is somehwere in the stdlib whatever
 inductive WHNorm : Term → Term → Prop where
@@ -131,14 +149,18 @@ inductive ValArrow (Comp₁ Comp₂ : Term → Prop) : Term → Prop
 | vallam : (∀ v, Comp₁ v → Comp₂ (t[v])) →
                ValArrow Comp₁ Comp₂ (lam t)
 
+inductive ValProd (Comp₁ Comp₂ : Term → Prop) : Term → Prop
+| valpair : Comp₁ a → Comp₂ b → ValProd Comp₁ Comp₂ (pair a b)
+
 def Comp (ty : Ty) (t : Term) : Prop :=
 match ty with
 | nat => ∃ v, WHNorm t v ∧ ValNat v
 | ty₁ ⟶ ty₂ => ∃ v, WHNorm t v ∧ ValArrow (Comp ty₁) (Comp ty₂) v
+| ty₁ ⊗ ty₂ => ∃ v, WHNorm t v ∧ ValProd (Comp ty₁) (Comp ty₂) v
 
-infix:30 "⊩" => (fun t ty => Comp ty t)
+infix:30 " ⊩ᶜ " => (fun t ty => Comp ty t)
 
-#check zero ⊩ nat
+#check zero ⊩ᶜ nat
 
 inductive CompEnv : List Ty → Substitution → Prop where
 | empty : CompEnv [] id
@@ -162,13 +184,8 @@ theorem comp_exp
   (h₂ : WHNorm t v)
   : Comp A t := by
   cases A <;> simp [Comp] at *
-  . have ⟨v', _⟩ := h₁
-    exists v'
-    refine ⟨?_, by grind⟩
-    apply WHNorm.trans
-    . exact h₂
-    . grind
-  . have ⟨v', _⟩ := h₁
+  all_goals
+    have ⟨v', _⟩ := h₁
     exists v'
     refine ⟨?_, by grind⟩
     apply WHNorm.trans
@@ -204,6 +221,7 @@ theorem ren_congr (t : Term) :
   induction t with
   | var k => intro τ₁ τ₂ h; simp [substRen, h k]
   | app t u iht ihu => intro τ₁ τ₂ h; simp [substRen, iht τ₁ τ₂ h, ihu τ₁ τ₂ h]
+  | pair t u iht ihu => intro τ₁ τ₂ h; simp [substRen, iht τ₁ τ₂ h, ihu τ₁ τ₂ h]
   | lam t iht =>
     intro τ₁ τ₂ h
     simp only [substRen]
@@ -215,6 +233,8 @@ theorem ren_congr (t : Term) :
     | succ k => simp [liftRen, renVar, h k]
   | zero => intro τ₁ τ₂ h; simp [substRen]
   | succ t iht => intro τ₁ τ₂ h; simp [substRen, iht τ₁ τ₂ h]
+  | fst t iht => intro τ₁ τ₂ h; simp [substRen, iht τ₁ τ₂ h]
+  | snd t iht => intro τ₁ τ₂ h; simp [substRen, iht τ₁ τ₂ h]
   | rect z s t ihz ihs iht => intro τ₁ τ₂ h; simp [substRen, ihz τ₁ τ₂ h, ihs τ₁ τ₂ h, iht τ₁ τ₂ h]
 
 theorem subst_congr (t : Term) :
@@ -222,6 +242,7 @@ theorem subst_congr (t : Term) :
   induction t with
   | var k => intro σ₁ σ₂ h; simp [subst, h k]
   | app t u iht ihu => intro σ₁ σ₂ h; simp [subst, iht σ₁ σ₂ h, ihu σ₁ σ₂ h]
+  | pair t u iht ihu => intro σ₁ σ₂ h; simp [subst, iht σ₁ σ₂ h, ihu σ₁ σ₂ h]
   | lam t iht =>
     intro σ₁ σ₂ h
     simp only [subst]
@@ -233,6 +254,8 @@ theorem subst_congr (t : Term) :
     | succ k => simp [lift, substVar, h k]
   | zero => intro σ₁ σ₂ h; simp [subst]
   | succ t iht => intro σ₁ σ₂ h; simp [subst, iht σ₁ σ₂ h]
+  | fst t iht => intro σ₁ σ₂ h; simp [subst, iht σ₁ σ₂ h]
+  | snd t iht => intro σ₁ σ₂ h; simp [subst, iht σ₁ σ₂ h]
   | rect z s t ihz ihs iht => intro σ₁ σ₂ h; simp [subst, ihz σ₁ σ₂ h, ihs σ₁ σ₂ h, iht σ₁ σ₂ h]
 
 theorem substRen_comp (t : Term) :
@@ -240,6 +263,7 @@ theorem substRen_comp (t : Term) :
   induction t with
   | var k => intro τ₁ τ₂; simp [substRen, renVar]
   | app t u iht ihu => intro τ₁ τ₂; simp [substRen, iht τ₁ τ₂, ihu τ₁ τ₂]
+  | pair t u iht ihu => intro τ₁ τ₂; simp [substRen, iht τ₁ τ₂, ihu τ₁ τ₂]
   | lam t iht =>
     intro τ₁ τ₂
     simp only [substRen]
@@ -252,6 +276,8 @@ theorem substRen_comp (t : Term) :
     | succ k => simp [liftRen, renVar]
   | zero => intro τ₁ τ₂; simp [substRen]
   | succ t iht => intro τ₁ τ₂; simp [substRen, iht τ₁ τ₂]
+  | fst t iht => intro τ₁ τ₂; simp [substRen, iht τ₁ τ₂]
+  | snd t iht => intro τ₁ τ₂; simp [substRen, iht τ₁ τ₂]
   | rect z s t ihz ihs iht => intro τ₁ τ₂; simp [substRen, ihz τ₁ τ₂, ihs τ₁ τ₂, iht τ₁ τ₂]
 
 theorem subst_ren_fuse (t : Term) :
@@ -259,6 +285,7 @@ theorem subst_ren_fuse (t : Term) :
   induction t with
   | var k => intro ρ τ; simp [subst, substVar]
   | app t u iht ihu => intro ρ τ; simp [subst, substRen, iht ρ τ, ihu ρ τ]
+  | pair t u iht ihu => intro ρ τ; simp [subst, substRen, iht ρ τ, ihu ρ τ]
   | lam t iht =>
     intro ρ τ
     simp only [subst, substRen]
@@ -276,6 +303,8 @@ theorem subst_ren_fuse (t : Term) :
       simp [renVar, liftRen]
   | zero => intro ρ τ; simp [subst, substRen]
   | succ t iht => intro ρ τ; simp [subst, substRen, iht ρ τ]
+  | fst t iht => intro ρ τ; simp [subst, substRen, iht ρ τ]
+  | snd t iht => intro ρ τ; simp [subst, substRen, iht ρ τ]
   | rect z s t ihz ihs iht => intro ρ τ; simp [subst, substRen, ihz ρ τ, ihs ρ τ, iht ρ τ]
 
 theorem ren_subst_fuse (t : Term) :
@@ -285,6 +314,7 @@ theorem ren_subst_fuse (t : Term) :
   induction t with
   | var k => intro τ ρ σ h; simp [substRen, subst, h k]
   | app t u iht ihu => intro τ ρ σ h; simp [substRen, subst, iht τ ρ σ h, ihu τ ρ σ h]
+  | pair t u iht ihu => intro τ ρ σ h; simp [substRen, subst, iht τ ρ σ h, ihu τ ρ σ h]
   | lam t iht =>
     intro τ ρ σ h
     simp only [substRen, subst]
@@ -296,12 +326,15 @@ theorem ren_subst_fuse (t : Term) :
     | succ k => simp [liftRen, renVar, lift, substVar, h k]
   | zero => intro τ ρ σ h; simp [substRen, subst]
   | succ t iht => intro τ ρ σ h; simp [substRen, subst, iht τ ρ σ h]
+  | fst t iht => intro τ ρ σ h; simp [substRen, subst, iht τ ρ σ h]
+  | snd t iht => intro τ ρ σ h; simp [substRen, subst, iht τ ρ σ h]
   | rect z s t ihz ihs iht => intro τ ρ σ h; simp [substRen, subst, ihz τ ρ σ h, ihs τ ρ σ h, iht τ ρ σ h]
 
 theorem subst_id (t : Term) : t [id] = t := by
   induction t with
   | var k => simp [subst, substVar, renVar]
   | app t u iht ihu => simp [subst, iht, ihu]
+  | pair t u iht ihu => simp [subst, iht, ihu]
   | lam t iht =>
     simp only [subst]
     congr 1
@@ -309,6 +342,8 @@ theorem subst_id (t : Term) : t [id] = t := by
     exact iht
   | zero => simp [subst]
   | succ t iht => simp [subst, iht]
+  | fst t iht => simp [subst, iht]
+  | snd t iht => simp [subst, iht]
   | rect z s t ihz ihs iht => simp [subst, ihz, ihs, iht]
 
 theorem subsRen_shift_cons :
@@ -333,6 +368,7 @@ theorem subst_fuse (t : Term) :
   induction t with
   | var k => intro ρ₁ ρ₂ σ h; simp [subst, h k]
   | app t u iht ihu => intro ρ₁ ρ₂ σ h; simp [subst, iht ρ₁ ρ₂ σ h, ihu ρ₁ ρ₂ σ h]
+  | pair t u iht ihu => intro ρ₁ ρ₂ σ h; simp [subst, iht ρ₁ ρ₂ σ h, ihu ρ₁ ρ₂ σ h]
   | lam t iht =>
     intro ρ₁ ρ₂ σ h
     simp only [subst]
@@ -353,6 +389,8 @@ theorem subst_fuse (t : Term) :
       rw [h k]
   | zero => intro ρ₁ ρ₂ σ h; simp [subst]
   | succ t iht => intro ρ₁ ρ₂ σ h; simp [subst, iht ρ₁ ρ₂ σ h]
+  | fst t iht => intro ρ₁ ρ₂ σ h; simp [subst, iht ρ₁ ρ₂ σ h]
+  | snd t iht => intro ρ₁ ρ₂ σ h; simp [subst, iht ρ₁ ρ₂ σ h]
   | rect z s t ihz ihs iht => intro ρ₁ ρ₂ σ h; simp [subst, ihz ρ₁ ρ₂ σ h, ihs ρ₁ ρ₂ σ h, iht ρ₁ ρ₂ σ h]
 
 theorem subst_lift {t v : Term} {σ : Substitution} :
@@ -366,6 +404,16 @@ theorem WHNorm.rectNe {z s t t' : Term}
   induction h; apply WHNorm.refl
   case _ t₁ t₂ t₃ _ _ _ =>
     apply WHNorm.step (t' := rect z s t₂) <;> grind [WHRed]
+
+theorem WHNorm.fstNe {t t' : Term} (h : WHNorm t t') : WHNorm (fst t) (fst t') := by
+  induction h with
+  | refl => exact .refl
+  | step r _ ih => exact .step (.fstNe r) ih
+
+theorem WHNorm.sndNe {t t' : Term} (h : WHNorm t t') : WHNorm (snd t) (snd t') := by
+  induction h with
+  | refl => exact .refl
+  | step r _ ih => exact .step (.sndNe r) ih
 
 theorem comp_app
   (h₁ : Comp (A ⟶ B) t) (h₂ : Comp A u) : Comp B (t.app u) := by
@@ -461,6 +509,31 @@ theorem comp_ty
     . exact rect_comp valv hz' hs'
     . apply WHNorm.rectNe
       exact hv
+  case pair =>
+    rename_i iha ihb
+    intro σ compEnv
+    simp only [subst, Comp]
+    exact ⟨_, WHNorm.refl, ValProd.valpair (iha compEnv) (ihb compEnv)⟩
+  case fst =>
+    rename_i iht
+    intro σ compEnv
+    have h := iht compEnv
+    simp only [Comp] at h
+    obtain ⟨v, hv, hval⟩ := h
+    cases hval with
+    | valpair ha _ =>
+      simp only [subst]
+      exact comp_exp ha ((WHNorm.fstNe hv).trans (WHNorm.step WHRed.fstPair WHNorm.refl))
+  case snd =>
+    rename_i iht
+    intro σ compEnv
+    have h := iht compEnv
+    simp only [Comp] at h
+    obtain ⟨v, hv, hval⟩ := h
+    cases hval with
+    | valpair _ hb =>
+      simp only [subst]
+      exact comp_exp hb ((WHNorm.sndNe hv).trans (WHNorm.step WHRed.sndPair WHNorm.refl))
 
 
 -- I guess we could have used this before, maybe we'll go back
@@ -469,6 +542,7 @@ def Val (ty : Ty) (v : Term) : Prop :=
 match ty with
 | nat => ValNat v
 | ty₁ ⟶ ty₂ => ValArrow (Val ty₁) (Val ty₂) v
+| ty₁ ⊗ ty₂ => ValProd (Val ty₁) (Val ty₂) v
 
 def Eval (t : Term) (ty : Ty) (v : Term) : Prop :=
   HasType [] t ty ∧ WHNorm t v ∧ Val ty v
@@ -495,28 +569,31 @@ theorem tri_lt {s s' : Nat} (h : s < s') : tri s + s + 1 ≤ tri s' := by
     · have := ih (by omega); omega
 
 /-- The Cantor pairing function. -/
-def pair (a b : Nat) : Nat := tri (a + b) + b
+def npair (a b : Nat) : Nat := tri (a + b) + b
 
-theorem pair_inj {a b c d : Nat} (h : pair a b = pair c d) : a = c ∧ b = d := by
-  unfold pair at h
+theorem npair_inj {a b c d : Nat} (h : npair a b = npair c d) : a = c ∧ b = d := by
+  unfold npair at h
   rcases Nat.lt_trichotomy (a + b) (c + d) with hlt | heq | hgt
   · have := tri_lt hlt; omega
   · rw [heq] at h; omega
   · have := tri_lt hgt; omega
 
 @[simp]
-theorem pair_eq_iff {a b c d : Nat} : pair a b = pair c d ↔ a = c ∧ b = d :=
-  ⟨pair_inj, fun ⟨h₁, h₂⟩ => h₁ ▸ h₂ ▸ rfl⟩
+theorem npair_eq_iff {a b c d : Nat} : npair a b = npair c d ↔ a = c ∧ b = d :=
+  ⟨npair_inj, fun ⟨h₁, h₂⟩ => h₁ ▸ h₂ ▸ rfl⟩
 
 /-- Gödel numbering of terms: a tag for the head constructor, paired with
 the (paired) codes of the arguments. -/
 def code : Term → Nat
-| var n => pair 0 n
-| app t u => pair 1 (pair (code t) (code u))
-| lam t => pair 2 (code t)
-| zero => pair 3 0
-| succ t => pair 4 (code t)
-| rect z s t => pair 5 (pair (code z) (pair (code s) (code t)))
+| var n => npair 0 n
+| app t u => npair 1 (npair (code t) (code u))
+| lam t => npair 2 (code t)
+| zero => npair 3 0
+| succ t => npair 4 (code t)
+| rect z s t => npair 5 (npair (code z) (npair (code s) (code t)))
+| pair a b => npair 6 (npair (code a) (code b))
+| fst t => npair 7 (code t)
+| snd t => npair 8 (code t)
 
 theorem code_inj {t t' : Term} (h : code t = code t') : t = t' := by
   induction t generalizing t' with
@@ -536,6 +613,16 @@ theorem code_inj {t t' : Term} (h : code t = code t') : t = t' := by
     cases t' <;> simp [code] at h
     obtain ⟨h₁, h₂, h₃⟩ := h
     rw [ihz h₁, ihs h₂, iht h₃]
+  | pair a b iha ihb =>
+    cases t' <;> simp [code] at h
+    obtain ⟨h₁, h₂⟩ := h
+    rw [iha h₁, ihb h₂]
+  | fst t ih =>
+    cases t' <;> simp [code] at h
+    rw [ih h]
+  | snd t ih =>
+    cases t' <;> simp [code] at h
+    rw [ih h]
 
 /-- The numeral `succ^n zero`. -/
 def numeral : Nat → Term
@@ -591,18 +678,18 @@ theorem cantor_quote (t : Term) : ⌜t⌝ = numeral (code t) := rfl
 /-! The encoding is compositional: the code of a term is computed from the
 codes of its immediate subterms (by definition). -/
 
-theorem code_app (t u : Term) : code (t ⬝ u) = pair 1 (pair (code t) (code u)) := rfl
-theorem code_lam (t : Term) : code (lam t) = pair 2 (code t) := rfl
-theorem code_succ (t : Term) : code (succ t) = pair 4 (code t) := rfl
+theorem code_app (t u : Term) : code (t ⬝ u) = npair 1 (npair (code t) (code u)) := rfl
+theorem code_lam (t : Term) : code (lam t) = npair 2 (code t) := rfl
+theorem code_succ (t : Term) : code (succ t) = npair 4 (code t) := rfl
 theorem code_rect (z s t : Term) :
-    code (rect z s t) = pair 5 (pair (code z) (pair (code s) (code t))) := rfl
+    code (rect z s t) = npair 5 (npair (code z) (npair (code s) (code t))) := rfl
 
 #eval code (lam (var 0))
 #eval code (lam (var 0) ⬝ 0)
 
 /-! ## The encoding inside System T
 
-We implement `pair`, and from it the term constructors on codes, as closed
+We implement `npair`, and from it the term constructors on codes, as closed
 T-terms, and show they compute correctly. Because reduction is call-by-name,
 the specifications only ask that arguments *reduce* to numerals. -/
 
@@ -703,7 +790,7 @@ def pairT : Term := lam (lam (addT ⬝ (triT ⬝ (addT ⬝ var 1 ⬝ var 0)) ⬝
 
 theorem pairT_spec {a b : Term} {n m : Nat}
     (ha : a ⇒* numeral n) (hb : b ⇒* numeral m) :
-    pairT ⬝ a ⬝ b ⇒* numeral (pair n m) := by
+    pairT ⬝ a ⬝ b ⇒* numeral (npair n m) := by
   unfold pairT
   apply WHNorm.trans WHNorm.beta2
   simp only [subst, substVar, addT_subst, triT_subst, Nat.one_ne_zero, ite_false,
@@ -726,7 +813,7 @@ theorem AppT_spec {a b t u : Term} (ha : a ⇒* ⌜t⌝) (hb : b ⇒* ⌜u⌝) :
     Nat.one_ne_zero, ite_false, ite_true, Nat.add_one_sub_one]
   exact pairT_spec WHNorm.refl (pairT_spec ha hb)
 
-/-- `fun _ acc => pair 4 acc`, i.e. `⌜n⌝ ↦ ⌜succ n⌝` -/
+/-- `fun _ acc => npair 4 acc`, i.e. `⌜n⌝ ↦ ⌜succ n⌝` -/
 def quoteStep : Term := lam (lam (pairT ⬝ 4 ⬝ var 0))
 
 /-- `QuoteT ⬝ n ⇒* ⌜n⌝` for numerals `n`, hence `QuoteT ⬝ ⌜t⌝ ⇒* ⌜⌜t⌝⌝`. -/
@@ -824,6 +911,11 @@ inductive Par : Term → Term → Prop where
 | prectz : Par z z' → Par (rect z s zero) z'
 | prects : Par z z' → Par s s' → Par t t' →
     Par (rect z s (succ t)) (app (app s' t') (rect z' s' t'))
+| ppair : Par a a' → Par b b' → Par (pair a b) (pair a' b')
+| pfst : Par t t' → Par (fst t) (fst t')
+| psnd : Par t t' → Par (snd t) (snd t')
+| pfstβ : Par a a' → Par (fst (pair a b)) a'
+| psndβ : Par b b' → Par (snd (pair a b)) b'
 
 theorem par_refl : ∀ t, Par t t
   | var _ => .pvar
@@ -832,6 +924,9 @@ theorem par_refl : ∀ t, Par t t
   | zero => .pzero
   | succ t => .psucc (par_refl t)
   | rect z s t => .prect (par_refl z) (par_refl s) (par_refl t)
+  | pair a b => .ppair (par_refl a) (par_refl b)
+  | fst t => .pfst (par_refl t)
+  | snd t => .psnd (par_refl t)
 
 theorem ren_beta {t u : Term} {τ : Renaming} :
     substRen (subst t (u ⋆ id)) τ = subst (substRen t (liftRen τ)) (substRen u τ ⋆ id) := by
@@ -859,6 +954,11 @@ theorem par_ren {t t' : Term} (h : Par t t') : ∀ τ, Par (substRen t τ) (subs
   | pbeta _ _ iht ihu => intro τ; rw [ren_beta]; exact .pbeta (iht _) (ihu τ)
   | prectz _ ihz => intro τ; exact .prectz (ihz τ)
   | prects _ _ _ ihz ihs iht => intro τ; exact .prects (ihz τ) (ihs τ) (iht τ)
+  | ppair _ _ iha ihb => intro τ; exact .ppair (iha τ) (ihb τ)
+  | pfst _ ih => intro τ; exact .pfst (ih τ)
+  | psnd _ ih => intro τ; exact .psnd (ih τ)
+  | pfstβ _ ih => intro τ; exact .pfstβ (ih τ)
+  | psndβ _ ih => intro τ; exact .psndβ (ih τ)
 
 theorem par_lift {σ σ' : Substitution} (hσ : ∀ k, Par (substVar k σ) (substVar k σ')) :
     ∀ k, Par (substVar k (lift σ)) (substVar k (lift σ')) := by
@@ -884,6 +984,11 @@ theorem par_subst {t t' : Term} (h : Par t t') :
   | prectz _ ihz => intro σ σ' hσ; exact .prectz (ihz σ σ' hσ)
   | prects _ _ _ ihz ihs iht =>
     intro σ σ' hσ; exact .prects (ihz σ σ' hσ) (ihs σ σ' hσ) (iht σ σ' hσ)
+  | ppair _ _ iha ihb => intro σ σ' hσ; exact .ppair (iha σ σ' hσ) (ihb σ σ' hσ)
+  | pfst _ ih => intro σ σ' hσ; exact .pfst (ih σ σ' hσ)
+  | psnd _ ih => intro σ σ' hσ; exact .psnd (ih σ σ' hσ)
+  | pfstβ _ ih => intro σ σ' hσ; exact .pfstβ (ih σ σ' hσ)
+  | psndβ _ ih => intro σ σ' hσ; exact .psndβ (ih σ σ' hσ)
 
 /-- The complete development: contract every redex visible in the term. -/
 def cd : Term → Term
@@ -896,12 +1001,21 @@ def cd : Term → Term
 | rect z _ zero => cd z
 | rect z s (succ t) => app (app (cd s) (cd t)) (rect (cd z) (cd s) (cd t))
 | rect z s t => rect (cd z) (cd s) (cd t)
+| pair a b => pair (cd a) (cd b)
+| fst (pair a _) => cd a
+| fst t => fst (cd t)
+| snd (pair _ b) => cd b
+| snd t => snd (cd t)
 
 theorem par_lam_inv {t t' : Term} (h : Par (lam t) (lam t')) : Par t t' := by
   cases h; assumption
 
 theorem par_succ_inv {t t' : Term} (h : Par (succ t) (succ t')) : Par t t' := by
   cases h; assumption
+
+theorem par_pair_inv {a b a' b' : Term} (h : Par (pair a b) (pair a' b')) :
+    Par a a' ∧ Par b b' := by
+  cases h; exact ⟨by assumption, by assumption⟩
 
 /-- Takahashi's triangle: every parallel step can be completed to `cd`. -/
 theorem par_triangle {t t' : Term} (h : Par t t') : Par t' (cd t) := by
@@ -929,6 +1043,17 @@ theorem par_triangle {t t' : Term} (h : Par t t') : Par t' (cd t) := by
     | succ k => exact par_refl _
   | prectz _ ihz => exact ihz
   | prects _ _ _ ihz ihs iht => exact .papp (.papp ihs iht) (.prect ihz ihs iht)
+  | ppair _ _ iha ihb => exact .ppair iha ihb
+  | @pfst t t₁ ht ih =>
+    cases t with
+    | pair a b => cases ht; exact .pfstβ (par_pair_inv ih).1
+    | _ => exact .pfst ih
+  | @psnd t t₁ ht ih =>
+    cases t with
+    | pair a b => cases ht; exact .psndβ (par_pair_inv ih).2
+    | _ => exact .psnd ih
+  | pfstβ _ ih => exact ih
+  | psndβ _ ih => exact ih
 
 inductive ParStar : Term → Term → Prop where
 | refl : ParStar t t
@@ -959,6 +1084,10 @@ theorem whred_par {t t' : Term} (h : WHRed t t') : Par t t' := by
   | succ _ ih => exact .psucc ih
   | rectz => exact .prectz (par_refl _)
   | rects => exact .prects (par_refl _) (par_refl _) (par_refl _)
+  | fstNe _ ih => exact .pfst ih
+  | sndNe _ ih => exact .psnd ih
+  | fstPair => exact .pfstβ (par_refl _)
+  | sndPair => exact .psndβ (par_refl _)
 
 theorem whnorm_parStar {t v : Term} (h : t ⇒* v) : ParStar t v := by
   induction h with
@@ -1003,6 +1132,12 @@ inductive Red : Term → Term → Prop where
 | rectZ : Red z z' → Red (rect z s t) (rect z' s t)
 | rectS : Red s s' → Red (rect z s t) (rect z s' t)
 | rectT : Red t t' → Red (rect z s t) (rect z s t')
+| fstβ : Red (fst (pair a b)) a
+| sndβ : Red (snd (pair a b)) b
+| pairL : Red a a' → Red (pair a b) (pair a' b)
+| pairR : Red b b' → Red (pair a b) (pair a b')
+| fst : Red t t' → Red (fst t) (fst t')
+| snd : Red t t' → Red (snd t) (snd t')
 
 inductive RedStar : Term → Term → Prop where
 | refl : RedStar t t
@@ -1037,6 +1172,14 @@ theorem RedStar.rect {z z' s s' t t' : Term} (hz : z ⟶* z') (hs : s ⟶* s') (
   ((hz.map (Term.rect · s t) .rectZ).trans (hs.map (Term.rect z' · t) .rectS)).trans
     (ht.map (Term.rect z' s' ·) .rectT)
 
+theorem RedStar.pair {a a' b b' : Term} (ha : a ⟶* a') (hb : b ⟶* b') :
+    pair a b ⟶* pair a' b' :=
+  (ha.map (Term.pair · b) .pairL).trans (hb.map (Term.pair a' ·) .pairR)
+
+theorem RedStar.fst {t t' : Term} (h : t ⟶* t') : fst t ⟶* fst t' := h.map _ .fst
+
+theorem RedStar.snd {t t' : Term} (h : t ⟶* t') : snd t ⟶* snd t' := h.map _ .snd
+
 theorem red_par {t t' : Term} (h : Red t t') : Par t t' := by
   induction h with
   | beta => exact .pbeta (par_refl _) (par_refl _)
@@ -1049,6 +1192,12 @@ theorem red_par {t t' : Term} (h : Red t t') : Par t t' := by
   | rectZ _ ih => exact .prect ih (par_refl _) (par_refl _)
   | rectS _ ih => exact .prect (par_refl _) ih (par_refl _)
   | rectT _ ih => exact .prect (par_refl _) (par_refl _) ih
+  | fstβ => exact .pfstβ (par_refl _)
+  | sndβ => exact .psndβ (par_refl _)
+  | pairL _ ih => exact .ppair ih (par_refl _)
+  | pairR _ ih => exact .ppair (par_refl _) ih
+  | fst _ ih => exact .pfst ih
+  | snd _ ih => exact .psnd ih
 
 theorem par_redStar {t t' : Term} (h : Par t t') : t ⟶* t' := by
   induction h with
@@ -1061,6 +1210,11 @@ theorem par_redStar {t t' : Term} (h : Par t t') : t ⟶* t' := by
   | pbeta _ _ iht ihu => exact (iht.lam.app ihu).trans (.single .beta)
   | prectz _ ihz => exact (RedStar.single .rectz).trans ihz
   | prects _ _ _ ihz ihs iht => exact (ihz.rect ihs iht.succ).trans (.single .rects)
+  | ppair _ _ iha ihb => exact iha.pair ihb
+  | pfst _ ih => exact ih.fst
+  | psnd _ ih => exact ih.snd
+  | pfstβ _ ih => exact (RedStar.single .fstβ).trans ih
+  | psndβ _ ih => exact (RedStar.single .sndβ).trans ih
 
 theorem redStar_parStar {t t' : Term} (h : t ⟶* t') : ParStar t t' := by
   induction h with
