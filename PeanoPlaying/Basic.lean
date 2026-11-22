@@ -19,6 +19,9 @@ abbrev Ctxt := List Ty
 
 open Term Ty
 
+/-- Application, `t ⬝ u := app t u`. -/
+infixl:100 " ⬝ " => Term.app
+
 #check ((nat ⟶ nat) ⟶ nat)
 
 #check (nat ⟶ (nat ⟶ nat))
@@ -111,6 +114,8 @@ inductive WHRed : Term → Term → Prop where
 inductive WHNorm : Term → Term → Prop where
 | refl : WHNorm t t
 | step : WHRed t t' → WHNorm t' t'' → WHNorm t t''
+
+infix:50 " ⇒* " => WHNorm
 
 theorem WHNorm.trans
 (h₁ : WHNorm t t')
@@ -457,3 +462,734 @@ theorem comp_ty
     . apply WHNorm.rectNe
       exact hv
 
+
+-- I guess we could have used this before, maybe we'll go back
+-- and change it.
+def Val (ty : Ty) (v : Term) : Prop :=
+match ty with
+| nat => ValNat v
+| ty₁ ⟶ ty₂ => ValArrow (Val ty₁) (Val ty₂) v
+
+def Eval (t : Term) (ty : Ty) (v : Term) : Prop :=
+  HasType [] t ty ∧ WHNorm t v ∧ Val ty v
+
+/-! ## Encoding terms as natural numbers
+
+We go in two steps: first a Gödel numbering `code : Term → Nat` built from
+the Cantor pairing function, then the numeral of that number as a closed
+term of type `nat`. -/
+
+/-- Triangular numbers, defined recursively to avoid division:
+`tri n = n * (n + 1) / 2`. -/
+def tri : Nat → Nat
+| 0 => 0
+| n + 1 => tri n + n + 1
+
+theorem tri_lt {s s' : Nat} (h : s < s') : tri s + s + 1 ≤ tri s' := by
+  induction s' with
+  | zero => omega
+  | succ s' ih =>
+    simp only [tri]
+    by_cases hs : s = s'
+    · subst hs; omega
+    · have := ih (by omega); omega
+
+/-- The Cantor pairing function. -/
+def pair (a b : Nat) : Nat := tri (a + b) + b
+
+theorem pair_inj {a b c d : Nat} (h : pair a b = pair c d) : a = c ∧ b = d := by
+  unfold pair at h
+  rcases Nat.lt_trichotomy (a + b) (c + d) with hlt | heq | hgt
+  · have := tri_lt hlt; omega
+  · rw [heq] at h; omega
+  · have := tri_lt hgt; omega
+
+@[simp]
+theorem pair_eq_iff {a b c d : Nat} : pair a b = pair c d ↔ a = c ∧ b = d :=
+  ⟨pair_inj, fun ⟨h₁, h₂⟩ => h₁ ▸ h₂ ▸ rfl⟩
+
+/-- Gödel numbering of terms: a tag for the head constructor, paired with
+the (paired) codes of the arguments. -/
+def code : Term → Nat
+| var n => pair 0 n
+| app t u => pair 1 (pair (code t) (code u))
+| lam t => pair 2 (code t)
+| zero => pair 3 0
+| succ t => pair 4 (code t)
+| rect z s t => pair 5 (pair (code z) (pair (code s) (code t)))
+
+theorem code_inj {t t' : Term} (h : code t = code t') : t = t' := by
+  induction t generalizing t' with
+  | var n => cases t' <;> simp_all [code]
+  | app t u iht ihu =>
+    cases t' <;> simp [code] at h
+    obtain ⟨h₁, h₂⟩ := h
+    rw [iht h₁, ihu h₂]
+  | lam t ih =>
+    cases t' <;> simp [code] at h
+    rw [ih h]
+  | zero => cases t' <;> simp_all [code]
+  | succ t ih =>
+    cases t' <;> simp [code] at h
+    rw [ih h]
+  | rect z s t ihz ihs iht =>
+    cases t' <;> simp [code] at h
+    obtain ⟨h₁, h₂, h₃⟩ := h
+    rw [ihz h₁, ihs h₂, iht h₃]
+
+/-- The numeral `succ^n zero`. -/
+def numeral : Nat → Term
+| 0 => zero
+| n + 1 => succ (numeral n)
+
+/-- Numeric literals denote numerals: `(3 : Term) = succ (succ (succ zero))`. -/
+instance {n : Nat} : OfNat Term n := ⟨numeral n⟩
+
+@[simp] theorem ofNat_eq_numeral {n : Nat} : (OfNat.ofNat n : Term) = numeral n := rfl
+
+theorem numeral_typed {Γ : Ctxt} (n : Nat) : HasType Γ (numeral n) nat := by
+  induction n with
+  | zero => exact HasType.zero
+  | succ n ih => exact HasType.succ ih
+
+theorem numeral_val (n : Nat) : ValNat (numeral n) := by
+  induction n with
+  | zero => exact ValNat.valzero
+  | succ n ih => exact ValNat.valSucc ih
+
+theorem numeral_inj {n m : Nat} (h : numeral n = numeral m) : n = m := by
+  induction n generalizing m with
+  | zero => cases m <;> simp_all [numeral]
+  | succ n ih =>
+    cases m with
+    | zero => simp [numeral] at h
+    | succ m => simp only [numeral, Term.succ.injEq] at h; rw [ih h]
+
+/-- The Cantor quotation of a term: the numeral of its Gödel number. -/
+def quote (t : Term) : Term := numeral (code t)
+
+/-! ## Encodings and quotation notation -/
+
+/-- An encoding of terms as closed natural number values. Quotation
+`⌜t⌝` refers to the `Encoding` instance in scope. -/
+class Encoding where
+  encode : Term → Term
+  is_nat_encode : ∀ t, HasType [] (encode t) nat
+  is_val_encode : ∀ t, ValNat (encode t)
+  encode_inj : ∀ t t', encode t = encode t' → t = t'
+
+notation "⌜" t "⌝" => Encoding.encode t
+
+instance (priority := low) cantorEncoding : Encoding where
+  encode := quote
+  is_nat_encode t := numeral_typed (code t)
+  is_val_encode t := numeral_val (code t)
+  encode_inj _ _ h := code_inj (numeral_inj h)
+
+theorem cantor_quote (t : Term) : ⌜t⌝ = numeral (code t) := rfl
+
+/-! The encoding is compositional: the code of a term is computed from the
+codes of its immediate subterms (by definition). -/
+
+theorem code_app (t u : Term) : code (t ⬝ u) = pair 1 (pair (code t) (code u)) := rfl
+theorem code_lam (t : Term) : code (lam t) = pair 2 (code t) := rfl
+theorem code_succ (t : Term) : code (succ t) = pair 4 (code t) := rfl
+theorem code_rect (z s t : Term) :
+    code (rect z s t) = pair 5 (pair (code z) (pair (code s) (code t))) := rfl
+
+#eval code (lam (var 0))
+#eval code (lam (var 0) ⬝ 0)
+
+/-! ## The encoding inside System T
+
+We implement `pair`, and from it the term constructors on codes, as closed
+T-terms, and show they compute correctly. Because reduction is call-by-name,
+the specifications only ask that arguments *reduce* to numerals. -/
+
+theorem WHNorm.beta2 {t a b : Term} :
+    lam (lam t) ⬝ a ⬝ b ⇒* subst t (b ⋆ a ⋆ id) := by
+  apply WHNorm.step (WHRed.appNe WHRed.appLam)
+  show lam (subst t (lift (a ⋆ id))) ⬝ b ⇒* _
+  rw [← subst_lift]
+  exact WHNorm.appLam
+
+@[simp]
+theorem numeral_subst {n : Nat} {σ : Substitution} : subst (numeral n) σ = numeral n := by
+  induction n with
+  | zero => rfl
+  | succ n ih => simp [numeral, subst, ih]
+
+/-- Iteration on numerals: if `z` computes `f 0` and `s` maps `k`, `f k` to
+`f (k+1)`, then `rect z s` computes `f`. -/
+theorem rect_iter {z s : Term} (f : Nat → Nat)
+    (hz : z ⇒* numeral (f 0))
+    (hs : ∀ k t, t ⇒* numeral (f k) → s ⬝ numeral k ⬝ t ⇒* numeral (f (k + 1))) :
+    ∀ n, rect z s (numeral n) ⇒* numeral (f n)
+  | 0 => WHNorm.step WHRed.rectz hz
+  | n + 1 => WHNorm.step WHRed.rects (hs n _ (rect_iter f hz hs n))
+
+theorem rect_spec {z s a : Term} {n : Nat} (f : Nat → Nat)
+    (hz : z ⇒* numeral (f 0))
+    (hs : ∀ k t, t ⇒* numeral (f k) → s ⬝ numeral k ⬝ t ⇒* numeral (f (k + 1)))
+    (ha : a ⇒* numeral n) :
+    rect z s a ⇒* numeral (f n) :=
+  (WHNorm.rectNe ha).trans (rect_iter f hz hs n)
+
+/-! ### Addition -/
+
+/-- `fun _ acc => succ acc` -/
+def addStep : Term := lam (lam (succ (var 0)))
+
+/-- `fun x y => rect y addStep x` -/
+def addT : Term := lam (lam (rect (var 0) addStep (var 1)))
+
+@[simp] theorem addStep_subst {σ : Substitution} : subst addStep σ = addStep := by
+  simp [addStep, subst, substVar, lift]
+
+@[simp] theorem addT_subst {σ : Substitution} : subst addT σ = addT := by
+  simp [addT, subst, substVar, lift, substRen, renVar]
+
+theorem addT_spec {a b : Term} {n m : Nat}
+    (ha : a ⇒* numeral n) (hb : b ⇒* numeral m) :
+    addT ⬝ a ⬝ b ⇒* numeral (n + m) := by
+  unfold addT
+  apply WHNorm.trans WHNorm.beta2
+  simp only [subst, substVar, addStep_subst, Nat.one_ne_zero, ite_false, ite_true,
+    Nat.add_one_sub_one]
+  rw [Nat.add_comm]
+  apply rect_spec (fun k => m + k) hb _ ha
+  intro k t ht
+  unfold addStep
+  apply WHNorm.trans WHNorm.beta2
+  simp only [subst, substVar, ite_true]
+  exact WHNorm.succ ht
+
+/-! ### Triangular numbers -/
+
+/-- `fun k acc => succ (k + acc)` -/
+def triStep : Term := lam (lam (succ (addT ⬝ var 1 ⬝ var 0)))
+
+/-- `fun x => rect 0 triStep x` -/
+def triT : Term := lam (rect 0 triStep (var 0))
+
+@[simp] theorem triStep_subst {σ : Substitution} : subst triStep σ = triStep := by
+  simp [triStep, subst, substVar, lift, substRen, renVar]
+
+@[simp] theorem triT_subst {σ : Substitution} : subst triT σ = triT := by
+  simp [triT, subst, substVar, lift]
+
+theorem triT_spec {a : Term} {n : Nat} (ha : a ⇒* numeral n) :
+    triT ⬝ a ⇒* numeral (tri n) := by
+  unfold triT
+  apply WHNorm.trans WHNorm.appLam
+  simp only [subst, substVar, triStep_subst, ofNat_eq_numeral, numeral_subst, ite_true]
+  apply rect_spec tri WHNorm.refl _ ha
+  intro k t ht
+  unfold triStep
+  apply WHNorm.trans WHNorm.beta2
+  simp only [subst, substVar, addT_subst, Nat.one_ne_zero, ite_false, ite_true,
+    Nat.add_one_sub_one]
+  have : tri (k + 1) = (k + tri k) + 1 := by simp only [tri]; omega
+  rw [this]
+  exact WHNorm.succ (addT_spec WHNorm.refl ht)
+
+/-! ### Pairing -/
+
+/-- `fun a b => tri (a + b) + b` -/
+def pairT : Term := lam (lam (addT ⬝ (triT ⬝ (addT ⬝ var 1 ⬝ var 0)) ⬝ var 0))
+
+@[simp] theorem pairT_subst {σ : Substitution} : subst pairT σ = pairT := by
+  simp [pairT, subst, substVar, lift, substRen, renVar]
+
+theorem pairT_spec {a b : Term} {n m : Nat}
+    (ha : a ⇒* numeral n) (hb : b ⇒* numeral m) :
+    pairT ⬝ a ⬝ b ⇒* numeral (pair n m) := by
+  unfold pairT
+  apply WHNorm.trans WHNorm.beta2
+  simp only [subst, substVar, addT_subst, triT_subst, Nat.one_ne_zero, ite_false,
+    ite_true, Nat.add_one_sub_one]
+  exact addT_spec (triT_spec (addT_spec ha hb)) hb
+
+/-! ### Constructors on codes -/
+
+/-- `AppT ⬝ ⌜t⌝ ⬝ ⌜u⌝ ⇒* ⌜t ⬝ u⌝` -/
+def AppT : Term := lam (lam (pairT ⬝ 1 ⬝ (pairT ⬝ var 1 ⬝ var 0)))
+
+@[simp] theorem AppT_subst {σ : Substitution} : subst AppT σ = AppT := by
+  simp [AppT, subst, substVar, lift, substRen, renVar]
+
+theorem AppT_spec {a b t u : Term} (ha : a ⇒* ⌜t⌝) (hb : b ⇒* ⌜u⌝) :
+    AppT ⬝ a ⬝ b ⇒* ⌜t ⬝ u⌝ := by
+  unfold AppT
+  apply WHNorm.trans WHNorm.beta2
+  simp only [subst, substVar, pairT_subst, ofNat_eq_numeral, numeral_subst,
+    Nat.one_ne_zero, ite_false, ite_true, Nat.add_one_sub_one]
+  exact pairT_spec WHNorm.refl (pairT_spec ha hb)
+
+/-- `fun _ acc => pair 4 acc`, i.e. `⌜n⌝ ↦ ⌜succ n⌝` -/
+def quoteStep : Term := lam (lam (pairT ⬝ 4 ⬝ var 0))
+
+/-- `QuoteT ⬝ n ⇒* ⌜n⌝` for numerals `n`, hence `QuoteT ⬝ ⌜t⌝ ⇒* ⌜⌜t⌝⌝`. -/
+def QuoteT : Term := lam (rect (pairT ⬝ 3 ⬝ 0) quoteStep (var 0))
+
+@[simp] theorem quoteStep_subst {σ : Substitution} : subst quoteStep σ = quoteStep := by
+  simp [quoteStep, subst, substVar, lift]
+
+@[simp] theorem QuoteT_subst {σ : Substitution} : subst QuoteT σ = QuoteT := by
+  simp [QuoteT, subst, substVar, lift]
+
+theorem QuoteT_spec_numeral {a : Term} {n : Nat} (ha : a ⇒* numeral n) :
+    QuoteT ⬝ a ⇒* ⌜numeral n⌝ := by
+  unfold QuoteT
+  apply WHNorm.trans WHNorm.appLam
+  simp only [subst, substVar, pairT_subst, ofNat_eq_numeral, numeral_subst,
+    quoteStep_subst, ite_true]
+  apply rect_spec (fun k => code (numeral k)) (pairT_spec (n := 3) WHNorm.refl WHNorm.refl) _ ha
+  intro k t ht
+  unfold quoteStep
+  apply WHNorm.trans WHNorm.beta2
+  simp only [subst, substVar, pairT_subst, ofNat_eq_numeral, numeral_subst, ite_true]
+  exact pairT_spec (n := 4) WHNorm.refl ht
+
+theorem QuoteT_spec {a t : Term} (ha : a ⇒* ⌜t⌝) : QuoteT ⬝ a ⇒* ⌜⌜t⌝⌝ :=
+  QuoteT_spec_numeral ha
+
+/-! ### Typing -/
+
+theorem addStep_typed {Γ : Ctxt} : HasType Γ addStep (nat ⟶ nat ⟶ nat) :=
+  .lam (.lam (.succ (.var (n := 0) (by simp))))
+
+theorem addT_typed {Γ : Ctxt} : HasType Γ addT (nat ⟶ nat ⟶ nat) :=
+  .lam (.lam (.rect (.var (n := 0) (by simp)) addStep_typed (.var (n := 1) (by simp))))
+
+theorem triT_typed {Γ : Ctxt} : HasType Γ triT (nat ⟶ nat) :=
+  .lam (.rect (numeral_typed 0)
+    (.lam (.lam (.succ (.app (.app addT_typed (.var (n := 1) (by simp)))
+      (.var (n := 0) (by simp))))))
+    (.var (n := 0) (by simp)))
+
+theorem pairT_typed {Γ : Ctxt} : HasType Γ pairT (nat ⟶ nat ⟶ nat) :=
+  .lam (.lam (.app (.app addT_typed
+    (.app triT_typed (.app (.app addT_typed (.var (n := 1) (by simp)))
+      (.var (n := 0) (by simp)))))
+    (.var (n := 0) (by simp))))
+
+theorem AppT_typed {Γ : Ctxt} : HasType Γ AppT (nat ⟶ nat ⟶ nat) :=
+  .lam (.lam (.app (.app pairT_typed (numeral_typed 1))
+    (.app (.app pairT_typed (.var (n := 1) (by simp))) (.var (n := 0) (by simp)))))
+
+theorem QuoteT_typed {Γ : Ctxt} : HasType Γ QuoteT (nat ⟶ nat) :=
+  .lam (.rect (.app (.app pairT_typed (numeral_typed 3)) (numeral_typed 0))
+    (.lam (.lam (.app (.app pairT_typed (numeral_typed 4)) (.var (n := 0) (by simp)))))
+    (.var (n := 0) (by simp)))
+
+/-! ## Reasonable encodings
+
+An encoding is *reasonable* when application and quotation of codes are
+T-definable; this is exactly what self-application `t ⬝ ⌜t⌝` needs. -/
+
+class ReasonableEncoding extends Encoding where
+  appT : Term
+  quoteT : Term
+  appT_typed : ∀ {Γ}, HasType Γ appT (nat ⟶ nat ⟶ nat)
+  quoteT_typed : ∀ {Γ}, HasType Γ quoteT (nat ⟶ nat)
+  appT_spec : ∀ {a b t u}, a ⇒* encode t → b ⇒* encode u → appT ⬝ a ⬝ b ⇒* encode (t ⬝ u)
+  quoteT_spec : ∀ {a t}, a ⇒* encode t → quoteT ⬝ a ⇒* encode (encode t)
+
+instance cantorReasonable : ReasonableEncoding where
+  toEncoding := cantorEncoding
+  appT := AppT
+  quoteT := QuoteT
+  appT_typed := AppT_typed
+  quoteT_typed := QuoteT_typed
+  appT_spec := AppT_spec
+  quoteT_spec := QuoteT_spec
+
+/-! ## Uniqueness of normal forms
+
+Weak-head reduction is not confluent on its own: `rect z s (succ u)` can
+either fire `rects` or reduce `u`, and the results only join under full
+reduction. We go through Tait–Martin-Löf parallel reduction, whose reflexive
+transitive closure contains `⇒*` and is confluent (Takahashi's complete
+development). Numerals are normal for it, hence unique. -/
+
+inductive Par : Term → Term → Prop where
+| pvar : Par (var k) (var k)
+| papp : Par t t' → Par u u' → Par (app t u) (app t' u')
+| plam : Par t t' → Par (lam t) (lam t')
+| pzero : Par zero zero
+| psucc : Par t t' → Par (succ t) (succ t')
+| prect : Par z z' → Par s s' → Par t t' → Par (rect z s t) (rect z' s' t')
+| pbeta : Par t t' → Par u u' → Par (app (lam t) u) (subst t' (u' ⋆ id))
+| prectz : Par z z' → Par (rect z s zero) z'
+| prects : Par z z' → Par s s' → Par t t' →
+    Par (rect z s (succ t)) (app (app s' t') (rect z' s' t'))
+
+theorem par_refl : ∀ t, Par t t
+  | var _ => .pvar
+  | app t u => .papp (par_refl t) (par_refl u)
+  | lam t => .plam (par_refl t)
+  | zero => .pzero
+  | succ t => .psucc (par_refl t)
+  | rect z s t => .prect (par_refl z) (par_refl s) (par_refl t)
+
+theorem ren_beta {t u : Term} {τ : Renaming} :
+    substRen (subst t (u ⋆ id)) τ = subst (substRen t (liftRen τ)) (substRen u τ ⋆ id) := by
+  rw [← subst_ren_fuse]
+  symm
+  apply ren_subst_fuse
+  intro k
+  cases k <;> simp [renVar, liftRen, substVar, substRen]
+
+theorem subst_beta {t u : Term} {σ : Substitution} :
+    subst (subst t (u ⋆ id)) σ = subst (subst t (lift σ)) (subst u σ ⋆ id) := by
+  rw [subst_lift]
+  apply subst_fuse
+  intro k
+  cases k <;> simp [substVar, subst, renVar]
+
+theorem par_ren {t t' : Term} (h : Par t t') : ∀ τ, Par (substRen t τ) (substRen t' τ) := by
+  induction h with
+  | pvar => intro τ; exact .pvar
+  | papp _ _ ih₁ ih₂ => intro τ; exact .papp (ih₁ τ) (ih₂ τ)
+  | plam _ ih => intro τ; exact .plam (ih _)
+  | pzero => intro τ; exact .pzero
+  | psucc _ ih => intro τ; exact .psucc (ih τ)
+  | prect _ _ _ ihz ihs iht => intro τ; exact .prect (ihz τ) (ihs τ) (iht τ)
+  | pbeta _ _ iht ihu => intro τ; rw [ren_beta]; exact .pbeta (iht _) (ihu τ)
+  | prectz _ ihz => intro τ; exact .prectz (ihz τ)
+  | prects _ _ _ ihz ihs iht => intro τ; exact .prects (ihz τ) (ihs τ) (iht τ)
+
+theorem par_lift {σ σ' : Substitution} (hσ : ∀ k, Par (substVar k σ) (substVar k σ')) :
+    ∀ k, Par (substVar k (lift σ)) (substVar k (lift σ')) := by
+  intro k
+  cases k with
+  | zero => simp only [lift, substVar, ite_true]; exact .pvar
+  | succ k =>
+    simp only [lift, substVar, Nat.add_one_ne_zero, ite_false, Nat.add_one_sub_one]
+    exact par_ren (hσ k) _
+
+theorem par_subst {t t' : Term} (h : Par t t') :
+    ∀ σ σ', (∀ k, Par (substVar k σ) (substVar k σ')) → Par (subst t σ) (subst t' σ') := by
+  induction h with
+  | @pvar k => intro σ σ' hσ; exact hσ k
+  | papp _ _ ih₁ ih₂ => intro σ σ' hσ; exact .papp (ih₁ σ σ' hσ) (ih₂ σ σ' hσ)
+  | plam _ ih => intro σ σ' hσ; exact .plam (ih _ _ (par_lift hσ))
+  | pzero => intro σ σ' hσ; exact .pzero
+  | psucc _ ih => intro σ σ' hσ; exact .psucc (ih σ σ' hσ)
+  | prect _ _ _ ihz ihs iht =>
+    intro σ σ' hσ; exact .prect (ihz σ σ' hσ) (ihs σ σ' hσ) (iht σ σ' hσ)
+  | pbeta _ _ iht ihu =>
+    intro σ σ' hσ; rw [subst_beta]; exact .pbeta (iht _ _ (par_lift hσ)) (ihu σ σ' hσ)
+  | prectz _ ihz => intro σ σ' hσ; exact .prectz (ihz σ σ' hσ)
+  | prects _ _ _ ihz ihs iht =>
+    intro σ σ' hσ; exact .prects (ihz σ σ' hσ) (ihs σ σ' hσ) (iht σ σ' hσ)
+
+/-- The complete development: contract every redex visible in the term. -/
+def cd : Term → Term
+| var k => var k
+| app (lam t) u => subst (cd t) (cd u ⋆ id)
+| app t u => app (cd t) (cd u)
+| lam t => lam (cd t)
+| zero => zero
+| succ t => succ (cd t)
+| rect z _ zero => cd z
+| rect z s (succ t) => app (app (cd s) (cd t)) (rect (cd z) (cd s) (cd t))
+| rect z s t => rect (cd z) (cd s) (cd t)
+
+theorem par_lam_inv {t t' : Term} (h : Par (lam t) (lam t')) : Par t t' := by
+  cases h; assumption
+
+theorem par_succ_inv {t t' : Term} (h : Par (succ t) (succ t')) : Par t t' := by
+  cases h; assumption
+
+/-- Takahashi's triangle: every parallel step can be completed to `cd`. -/
+theorem par_triangle {t t' : Term} (h : Par t t') : Par t' (cd t) := by
+  induction h with
+  | pvar => exact .pvar
+  | @papp t t₁ u u₁ ht _ iht ihu =>
+    cases t with
+    | lam b =>
+      cases ht
+      exact .pbeta (par_lam_inv iht) ihu
+    | _ => exact .papp iht ihu
+  | plam _ ih => exact .plam ih
+  | pzero => exact .pzero
+  | psucc _ ih => exact .psucc ih
+  | @prect z z₁ s s₁ t t₁ _ _ ht ihz ihs iht =>
+    cases t with
+    | zero => cases ht; exact .prectz ihz
+    | succ v => cases ht; exact .prects ihz ihs (par_succ_inv iht)
+    | _ => exact .prect ihz ihs iht
+  | @pbeta t t₁ u u₁ _ _ iht ihu =>
+    refine par_subst iht (u₁ ⋆ id) (cd u ⋆ id) ?_
+    intro k
+    cases k with
+    | zero => exact ihu
+    | succ k => exact par_refl _
+  | prectz _ ihz => exact ihz
+  | prects _ _ _ ihz ihs iht => exact .papp (.papp ihs iht) (.prect ihz ihs iht)
+
+inductive ParStar : Term → Term → Prop where
+| refl : ParStar t t
+| step : Par t t' → ParStar t' t'' → ParStar t t''
+
+theorem par_strip {t a b : Term} (h₁ : Par t a) (h₂ : ParStar t b) :
+    ∃ w, ParStar a w ∧ Par b w := by
+  induction h₂ generalizing a with
+  | refl => exact ⟨a, .refl, h₁⟩
+  | step p _ ih =>
+    obtain ⟨w, hw, hbw⟩ := ih (par_triangle p)
+    exact ⟨w, .step (par_triangle h₁) hw, hbw⟩
+
+theorem parStar_confluent {t a b : Term} (h₁ : ParStar t a) (h₂ : ParStar t b) :
+    ∃ w, ParStar a w ∧ ParStar b w := by
+  induction h₁ generalizing b with
+  | refl => exact ⟨b, h₂, .refl⟩
+  | step p _ ih =>
+    obtain ⟨w₁, hw₁, hbw₁⟩ := par_strip p h₂
+    obtain ⟨w, haw, hw₁w⟩ := ih hw₁
+    exact ⟨w, haw, .step hbw₁ hw₁w⟩
+
+theorem whred_par {t t' : Term} (h : WHRed t t') : Par t t' := by
+  induction h with
+  | appNe _ ih => exact .papp ih (par_refl _)
+  | appLam => exact .pbeta (par_refl _) (par_refl _)
+  | rectNe _ ih => exact .prect (par_refl _) (par_refl _) ih
+  | succ _ ih => exact .psucc ih
+  | rectz => exact .prectz (par_refl _)
+  | rects => exact .prects (par_refl _) (par_refl _) (par_refl _)
+
+theorem whnorm_parStar {t v : Term} (h : t ⇒* v) : ParStar t v := by
+  induction h with
+  | refl => exact .refl
+  | step r _ ih => exact .step (whred_par r) ih
+
+theorem par_numeral : ∀ {n : Nat} {x : Term}, Par (numeral n) x → x = numeral n
+  | 0, _, h => by change Par zero _ at h; cases h; rfl
+  | n + 1, _, h => by
+    change Par (succ (numeral n)) _ at h
+    cases h with
+    | psucc h' => rw [par_numeral h']; rfl
+
+theorem parStar_numeral {t x : Term} {n : Nat} (h : ParStar t x) (ht : t = numeral n) :
+    x = numeral n := by
+  induction h with
+  | refl => exact ht
+  | step p _ ih => subst ht; exact ih (par_numeral p)
+
+/-- A term reduces to at most one numeral. -/
+theorem numeral_unique {t : Term} {n m : Nat} (h₁ : t ⇒* numeral n) (h₂ : t ⇒* numeral m) :
+    n = m := by
+  obtain ⟨w, hw₁, hw₂⟩ := parStar_confluent (whnorm_parStar h₁) (whnorm_parStar h₂)
+  exact numeral_inj ((parStar_numeral hw₁ rfl).symm.trans (parStar_numeral hw₂ rfl))
+
+/-- The diamond property of parallel reduction. -/
+theorem par_diamond {t a b : Term} (h₁ : Par t a) (h₂ : Par t b) :
+    ∃ w, Par a w ∧ Par b w :=
+  ⟨cd t, par_triangle h₁, par_triangle h₂⟩
+
+/-! ## Confluence of full reduction -/
+
+/-- Full one-step reduction: β and the two `rect` rules, in any context. -/
+inductive Red : Term → Term → Prop where
+| beta : Red (app (lam t) u) (subst t (u ⋆ id))
+| rectz : Red (rect z s zero) z
+| rects : Red (rect z s (succ t)) (app (app s t) (rect z s t))
+| appL : Red t t' → Red (app t u) (app t' u)
+| appR : Red u u' → Red (app t u) (app t u')
+| lam : Red t t' → Red (lam t) (lam t')
+| succ : Red t t' → Red (succ t) (succ t')
+| rectZ : Red z z' → Red (rect z s t) (rect z' s t)
+| rectS : Red s s' → Red (rect z s t) (rect z s' t)
+| rectT : Red t t' → Red (rect z s t) (rect z s t')
+
+inductive RedStar : Term → Term → Prop where
+| refl : RedStar t t
+| step : Red t t' → RedStar t' t'' → RedStar t t''
+
+infix:50 " ⟶* " => RedStar
+
+theorem RedStar.single {t t' : Term} (h : Red t t') : t ⟶* t' := .step h .refl
+
+theorem RedStar.trans {t t' t'' : Term} (h₁ : t ⟶* t') (h₂ : t' ⟶* t'') : t ⟶* t'' := by
+  induction h₁ with
+  | refl => exact h₂
+  | step r _ ih => exact .step r (ih h₂)
+
+/-- Lift a reduction sequence through a context `f`. -/
+theorem RedStar.map (f : Term → Term) (hf : ∀ {a b}, Red a b → Red (f a) (f b))
+    {t t' : Term} (h : t ⟶* t') : f t ⟶* f t' := by
+  induction h with
+  | refl => exact .refl
+  | step r _ ih => exact .step (hf r) ih
+
+theorem RedStar.app {t t' u u' : Term} (ht : t ⟶* t') (hu : u ⟶* u') :
+    app t u ⟶* app t' u' :=
+  (ht.map (Term.app · u) .appL).trans (hu.map (Term.app t' ·) .appR)
+
+theorem RedStar.lam {t t' : Term} (h : t ⟶* t') : lam t ⟶* lam t' := h.map _ .lam
+
+theorem RedStar.succ {t t' : Term} (h : t ⟶* t') : succ t ⟶* succ t' := h.map _ .succ
+
+theorem RedStar.rect {z z' s s' t t' : Term} (hz : z ⟶* z') (hs : s ⟶* s') (ht : t ⟶* t') :
+    rect z s t ⟶* rect z' s' t' :=
+  ((hz.map (Term.rect · s t) .rectZ).trans (hs.map (Term.rect z' · t) .rectS)).trans
+    (ht.map (Term.rect z' s' ·) .rectT)
+
+theorem red_par {t t' : Term} (h : Red t t') : Par t t' := by
+  induction h with
+  | beta => exact .pbeta (par_refl _) (par_refl _)
+  | rectz => exact .prectz (par_refl _)
+  | rects => exact .prects (par_refl _) (par_refl _) (par_refl _)
+  | appL _ ih => exact .papp ih (par_refl _)
+  | appR _ ih => exact .papp (par_refl _) ih
+  | lam _ ih => exact .plam ih
+  | succ _ ih => exact .psucc ih
+  | rectZ _ ih => exact .prect ih (par_refl _) (par_refl _)
+  | rectS _ ih => exact .prect (par_refl _) ih (par_refl _)
+  | rectT _ ih => exact .prect (par_refl _) (par_refl _) ih
+
+theorem par_redStar {t t' : Term} (h : Par t t') : t ⟶* t' := by
+  induction h with
+  | pvar => exact .refl
+  | papp _ _ ih₁ ih₂ => exact ih₁.app ih₂
+  | plam _ ih => exact ih.lam
+  | pzero => exact .refl
+  | psucc _ ih => exact ih.succ
+  | prect _ _ _ ihz ihs iht => exact ihz.rect ihs iht
+  | pbeta _ _ iht ihu => exact (iht.lam.app ihu).trans (.single .beta)
+  | prectz _ ihz => exact (RedStar.single .rectz).trans ihz
+  | prects _ _ _ ihz ihs iht => exact (ihz.rect ihs iht.succ).trans (.single .rects)
+
+theorem redStar_parStar {t t' : Term} (h : t ⟶* t') : ParStar t t' := by
+  induction h with
+  | refl => exact .refl
+  | step r _ ih => exact .step (red_par r) ih
+
+theorem parStar_redStar {t t' : Term} (h : ParStar t t') : t ⟶* t' := by
+  induction h with
+  | refl => exact .refl
+  | step p _ ih => exact (par_redStar p).trans ih
+
+/-- **Church–Rosser** for full β/rect reduction. -/
+theorem red_confluent {t a b : Term} (h₁ : t ⟶* a) (h₂ : t ⟶* b) :
+    ∃ w, a ⟶* w ∧ b ⟶* w := by
+  obtain ⟨w, hw₁, hw₂⟩ := parStar_confluent (redStar_parStar h₁) (redStar_parStar h₂)
+  exact ⟨w, parStar_redStar hw₁, parStar_redStar hw₂⟩
+
+/-- Weak-head reduction is a special case of full reduction. -/
+theorem whnorm_redStar {t v : Term} (h : t ⇒* v) : t ⟶* v :=
+  parStar_redStar (whnorm_parStar h)
+
+/-! ## There is no self-evaluator -/
+
+theorem ValNat.eq_numeral {v : Term} (h : ValNat v) : ∃ n, v = numeral n := by
+  induction h with
+  | valzero => exact ⟨0, rfl⟩
+  | valSucc _ ih => obtain ⟨n, rfl⟩ := ih; exact ⟨n + 1, rfl⟩
+
+/-- Closed terms of type `nat` evaluate to a numeral (from `comp_ty`). -/
+theorem normalize {t : Term} (h : HasType [] t nat) : ∃ n, t ⇒* numeral n := by
+  have hc := comp_ty h CompEnv.empty
+  rw [subst_id] at hc
+  simp only [Comp] at hc
+  obtain ⟨v, hv, hval⟩ := hc
+  obtain ⟨n, rfl⟩ := hval.eq_numeral
+  exact ⟨n, hv⟩
+
+/-- A self-evaluator computes, from the code of a closed natural number term,
+the value of that term. -/
+def SelfEvaluator [Encoding] (E : Term) : Prop :=
+  HasType [] E (nat ⟶ nat) ∧
+  ∀ t n, HasType [] t nat → t ⇒* numeral n → E ⬝ ⌜t⌝ ⇒* numeral n
+
+theorem WHNorm.beta_subst {t a : Term} {σ : Substitution} :
+    subst (lam t) σ ⬝ a ⇒* subst t (a ⋆ σ) := by
+  show lam (subst t (lift σ)) ⬝ a ⇒* _
+  rw [← subst_lift]
+  exact WHNorm.appLam
+
+theorem WHNorm.beta4 {t a b c d : Term} :
+    lam (lam (lam (lam t))) ⬝ a ⬝ b ⬝ c ⬝ d ⇒* subst t (d ⋆ c ⋆ b ⋆ a ⋆ id) := by
+  have h₁ : lam (lam (lam (lam t))) ⬝ a ⇒* subst (lam (lam (lam t))) (a ⋆ id) := by
+    have := WHNorm.beta_subst (t := lam (lam (lam t))) (a := a) (σ := id)
+    rwa [subst_id] at this
+  have h₂ := WHNorm.beta_subst (t := lam (lam t)) (a := b) (σ := a ⋆ id)
+  have h₃ := WHNorm.beta_subst (t := lam t) (a := c) (σ := b ⋆ a ⋆ id)
+  have h₄ := WHNorm.beta_subst (t := t) (a := d) (σ := c ⋆ b ⋆ a ⋆ id)
+  exact ((h₁.appNe.appNe.appNe).trans (h₂.appNe.appNe)).trans (h₃.appNe.trans h₄)
+
+/-! The diagonal term is `D x := succ (E (App x (Quote x)))`, except that we
+force the argument of `E` to a numeral with `rect` first: weak-head reduction
+never evaluates arguments, and a self-evaluator is only specified on literal
+codes. `E`, `App` and `Quote` are passed as arguments (variables 3, 2, 1) so no
+closedness assumptions are needed. -/
+
+/-- `fun k _ => E (succ k)` -/
+def diagStep : Term := lam (lam (var 5 ⬝ succ (var 1)))
+
+def diagBody : Term := succ (rect (var 3 ⬝ zero) diagStep (var 2 ⬝ var 0 ⬝ (var 1 ⬝ var 0)))
+
+/-- `fun E App Quote x => succ (E (App x (Quote x)))` (forcing the argument). -/
+def diagonal : Term := lam (lam (lam (lam diagBody)))
+
+def diag [ReasonableEncoding] (E : Term) : Term :=
+  diagonal ⬝ E ⬝ ReasonableEncoding.appT ⬝ ReasonableEncoding.quoteT
+
+theorem diagStep_spec {σ : Substitution} {k acc : Term} :
+    subst diagStep σ ⬝ k ⬝ acc ⇒* substVar 3 σ ⬝ succ k := by
+  unfold diagStep
+  have h₁ := WHNorm.beta_subst (t := lam (var 5 ⬝ succ (var 1))) (a := k) (σ := σ)
+  have h₂ := WHNorm.beta_subst (t := var 5 ⬝ succ (var 1)) (a := acc) (σ := k ⋆ σ)
+  have e : subst (var 5 ⬝ succ (var 1)) (acc ⋆ k ⋆ σ) = substVar 3 σ ⬝ succ k := by
+    simp [subst, substVar]
+  rw [e] at h₂
+  exact h₁.appNe.trans h₂
+
+theorem diag_force {σ : Substitution} {a : Term} {m : Nat} (ha : a ⇒* numeral m) :
+    rect (substVar 3 σ ⬝ zero) (subst diagStep σ) a ⇒* substVar 3 σ ⬝ numeral m := by
+  refine (WHNorm.rectNe ha).trans ?_
+  cases m with
+  | zero => exact WHNorm.step WHRed.rectz WHNorm.refl
+  | succ m => exact WHNorm.step WHRed.rects diagStep_spec
+
+/-- The diagonal equation: `D ⌜D⌝ ⇒* succ (E ⌜D ⌜D⌝⌝)`. -/
+theorem diag_spec [ReasonableEncoding] (E : Term) :
+    diag E ⬝ ⌜diag E⌝ ⇒* succ (E ⬝ ⌜diag E ⬝ ⌜diag E⌝⌝) := by
+  obtain ⟨m, hm⟩ := (Encoding.is_val_encode (diag E ⬝ ⌜diag E⌝)).eq_numeral
+  have h₁ : diag E ⬝ ⌜diag E⌝ ⇒* subst diagBody
+      (⌜diag E⌝ ⋆ ReasonableEncoding.quoteT ⋆ ReasonableEncoding.appT ⋆ E ⋆ id) :=
+    WHNorm.beta4
+  refine h₁.trans ?_
+  have ha : ReasonableEncoding.appT ⬝ ⌜diag E⌝ ⬝ (ReasonableEncoding.quoteT ⬝ ⌜diag E⌝)
+      ⇒* numeral m := by
+    rw [← hm]
+    exact ReasonableEncoding.appT_spec WHNorm.refl (ReasonableEncoding.quoteT_spec WHNorm.refl)
+  rw [hm]
+  exact WHNorm.succ
+    (diag_force (σ := ⌜diag E⌝ ⋆ ReasonableEncoding.quoteT ⋆ ReasonableEncoding.appT ⋆ E ⋆ id) ha)
+
+theorem diagonal_typed {Γ : Ctxt} :
+    HasType Γ diagonal ((nat ⟶ nat) ⟶ (nat ⟶ nat ⟶ nat) ⟶ (nat ⟶ nat) ⟶ nat ⟶ nat) :=
+  .lam (.lam (.lam (.lam (.succ (.rect
+    (.app (.var (n := 3) (by simp)) .zero)
+    (.lam (.lam (.app (.var (n := 5) (by simp)) (.succ (.var (n := 1) (by simp))))))
+    (.app (.app (.var (n := 2) (by simp)) (.var (n := 0) (by simp)))
+      (.app (.var (n := 1) (by simp)) (.var (n := 0) (by simp)))))))))
+
+/-- **There is no well-typed self-evaluator** for any reasonable encoding. -/
+theorem no_self_evaluator [ReasonableEncoding] (E : Term) : ¬ SelfEvaluator E := by
+  intro ⟨hE, hspec⟩
+  have hD : HasType [] (diag E) (nat ⟶ nat) :=
+    .app (.app (.app diagonal_typed hE) ReasonableEncoding.appT_typed)
+      ReasonableEncoding.quoteT_typed
+  have ht : HasType [] (diag E ⬝ ⌜diag E⌝) nat := .app hD (Encoding.is_nat_encode _)
+  obtain ⟨n, hn⟩ := normalize ht
+  have h : diag E ⬝ ⌜diag E⌝ ⇒* numeral (n + 1) :=
+    (diag_spec E).trans (WHNorm.succ (hspec _ n ht hn))
+  have := numeral_unique hn h
+  omega
+
+/-- In particular, for the Cantor encoding. -/
+example (E : Term) : ¬ SelfEvaluator E := no_self_evaluator E
