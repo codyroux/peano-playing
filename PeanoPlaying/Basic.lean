@@ -574,9 +574,9 @@ def npair (a b : Nat) : Nat := tri (a + b) + b
 theorem npair_inj {a b c d : Nat} (h : npair a b = npair c d) : a = c ∧ b = d := by
   unfold npair at h
   rcases Nat.lt_trichotomy (a + b) (c + d) with hlt | heq | hgt
-  · have := tri_lt hlt; omega
-  · rw [heq] at h; omega
-  · have := tri_lt hgt; omega
+  · have := tri_lt hlt; exact absurd h (by omega)
+  · rw [heq] at h; exact ⟨by omega, by omega⟩
+  · have := tri_lt hgt; exact absurd h (by omega)
 
 @[simp]
 theorem npair_eq_iff {a b c d : Nat} : npair a b = npair c d ↔ a = c ∧ b = d :=
